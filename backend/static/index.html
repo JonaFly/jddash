@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <title>BD业绩实时管控舱</title>
+  <!-- 引入 Vue 3, Element Plus, ECharts, Axios CDN -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/theme-chalk/dark/css-vars.css">
+  <script src="https://unpkg.com/element-plus"></script>
+  <script src="https://unpkg.com/@element-plus/icons-vue"></script>
+  <script src="https://unpkg.com/echarts@5.5.0/dist/echarts.min.js"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+  <style>
+    body {
+      margin: 0; padding: 0;
+      background-color: #0b0f19;
+      color: #fff;
+      font-family: 'Helvetica Neue', Helvetica, 'Microsoft YaHei', sans-serif;
+    }
+    #app {
+      padding: 20px;
+      box-sizing: border-box;
+      min-height: 100vh;
+    }
+    .top-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 30px; background: rgba(16, 25, 45, 0.6);
+      padding: 15px 30px; border-radius: 12px;
+      border: 1px solid rgba(0, 242, 254, 0.2);
+      box-shadow: 0 0 20px rgba(0, 242, 254, 0.1) inset;
+    }
+    .title-glow {
+      font-size: 24px; font-weight: bold;
+      background: linear-gradient(to right, #00f2fe, #4facfe);
+      -webkit-background-clip: text; color: transparent;
+      text-shadow: 0 0 10px rgba(0, 242, 254, 0.3); letter-spacing: 2px;
+    }
+    .header-right { display: flex; gap: 20px; align-items: center; }
+    .glow-btn {
+      background: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%); border: none;
+      box-shadow: 0 0 15px rgba(0, 242, 254, 0.4); color: white;
+      padding: 8px 15px; border-radius: 4px; cursor: pointer; transition: 0.3s;
+    }
+    .glow-btn:hover { box-shadow: 0 0 25px rgba(0, 242, 254, 0.7); transform: translateY(-2px); }
+    
+    .kpi-cards { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 25px; }
+    .card {
+      flex: 1; background: linear-gradient(180deg, rgba(23,35,63,0.8) 0%, rgba(13,20,38,0.8) 100%);
+      border-top: 2px solid #4facfe; border-radius: 10px; padding: 20px;
+      position: relative; overflow: hidden; box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    }
+    .card-title { color: #8b9eb8; font-size: 14px; margin-bottom: 10px; }
+    .card-value { font-size: 32px; font-weight: bold; color: #fff; margin-bottom: 10px; text-shadow: 0 0 10px rgba(255,255,255,0.2); }
+    .card-value .unit { font-size: 14px; color: #8b9eb8; }
+    .card-trend { font-size: 13px; display: inline-block; padding: 3px 8px; border-radius: 4px; }
+    .card-trend.up { background: rgba(0, 255, 136, 0.1); color: #00ff88; }
+    .card-trend.down { background: rgba(255, 77, 79, 0.1); color: #ff4d4f; }
+
+    .chart-row { display: flex; gap: 20px; margin-bottom: 20px; }
+    .chart-box { flex: 1; background: rgba(16, 25, 45, 0.6); border-radius: 12px; padding: 20px; border: 1px solid rgba(255, 255, 255, 0.05); }
+    .box-title { font-size: 16px; color: #e2e8f0; margin-bottom: 15px; padding-left: 10px; border-left: 4px solid #4facfe; }
+    .chart { width: 100%; height: 300px; }
+  </style>
+</head>
+<body class="dark">
+  <div id="app">
+    <header class="top-header">
+      <div class="title-glow">BD业绩实时管控舱</div>
+      <div class="header-right">
+        <el-upload
+          action="/api/upload"
+          :show-file-list="false"
+          :on-success="handleUploadSuccess"
+          :on-error="handleUploadError"
+          accept=".xlsx,.xls"
+        >
+          <button class="glow-btn">导入业务数据 Excel</button>
+        </el-upload>
+        <el-upload
+          action="/api/upload/store"
+          :show-file-list="false"
+          :on-success="handleUploadSuccess"
+          :on-error="handleUploadError"
+          accept=".xlsx,.xls"
+        >
+          <button class="glow-btn" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); box-shadow: 0 0 15px rgba(16, 185, 129, 0.4);">导入门店&街道基础</button>
+        </el-upload>
+      </div>
+    </header>
+
+    <div class="kpi-cards">
+      <div class="card" v-for="kpi in kpis" :key="kpi.title">
+        <div class="card-title">{{ kpi.title }}</div>
+        <div class="card-value">{{ kpi.val }} <span class="unit" v-if="kpi.unit">{{kpi.unit}}</span></div>
+        <div class="card-trend" :class="kpi.trend >= 0 ? 'up' : 'down'">
+          环比 {{ kpi.trend >= 0 ? '▲' : '▼' }} {{ Math.abs(kpi.trend) }}%
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-row">
+      <div class="chart-box">
+        <div class="box-title">每日新签门店趋势</div>
+        <div id="lineChart" class="chart"></div>
+      </div>
+      <div class="chart-box">
+        <div class="box-title">每日GMV总盘趋势</div>
+        <div id="areaChart" class="chart"></div>
+      </div>
+    </div>
+    <div class="chart-row">
+       <div class="chart-box">
+        <div class="box-title">BD业绩排行TOP10 (GMV)</div>
+        <div id="barChart" class="chart"></div>
+      </div>
+      <div class="chart-box">
+        <div class="box-title">活动覆盖率分布</div>
+        <div id="pieChart" class="chart"></div>
+      </div>
+    </div>
+
+    <div class="chart-box" style="margin-bottom: 20px;">
+      <div class="box-title">BD维度业绩明细</div>
+      <style>
+        .el-table { --el-table-bg-color: transparent; --el-table-tr-bg-color: transparent; --el-table-header-bg-color: rgba(16, 25, 45, 0.8); --el-table-border-color: rgba(255,255,255,0.1); --el-table-text-color: #e2e8f0; --el-table-header-text-color: #4facfe; }
+        .el-table th.el-table__cell { background-color: var(--el-table-header-bg-color); }
+        .el-table--enable-row-hover .el-table__body tr:hover>td.el-table__cell { background-color: rgba(79, 172, 254, 0.1); }
+      </style>
+      <el-table :data="bdTableData" style="width: 100%" height="500" border>
+        <el-table-column prop="bd_name" label="BD" fixed="left" width="120" align="center"></el-table-column>
+        <el-table-column label="日环比" align="center">
+          <el-table-column prop="yesterday_new_shops" label="昨日新签数" width="100" align="center"></el-table-column>
+          <el-table-column prop="yesterday_new_gmv" label="昨日新签GMV" width="120" align="center"></el-table-column>
+          <el-table-column prop="yesterday_b1_rate" label="营业B1率(98%)" width="130" align="center"></el-table-column>
+          <el-table-column prop="yesterday_b2_gt2_rate" label="营业B2率大于2(68%)" width="160" align="center"></el-table-column>
+          <el-table-column prop="yesterday_free_shipping_rate" label="营业免运费率(98%)" width="160" align="center"></el-table-column>
+        </el-table-column>
+        <el-table-column label="本月数据" align="center">
+          <el-table-column prop="month_new_shops" label="本月新签数" width="100" align="center"></el-table-column>
+          <el-table-column prop="month_new_gmv" label="本月新签GMV" width="120" align="center"></el-table-column>
+          <el-table-column prop="total_shops" label="带店数" width="100" align="center"></el-table-column>
+          <el-table-column prop="month_gmv" label="本月GMV" width="120" align="center"></el-table-column>
+        </el-table-column>
+        <el-table-column label="基础覆盖率" align="center">
+          <el-table-column prop="operate_rate" label="营业率" width="100" align="center"></el-table-column>
+          <el-table-column prop="operate_sales_rate" label="营业动销率" width="120" align="center"></el-table-column>
+          <el-table-column prop="month_b1_rate" label="营业B1率(98%)" width="130" align="center"></el-table-column>
+          <el-table-column prop="month_b2_rate" label="营业B2率" width="100" align="center"></el-table-column>
+          <el-table-column prop="month_b2_gt2_rate" label="营业B2率大于2(68%)" width="160" align="center"></el-table-column>
+          <el-table-column prop="month_free_shipping_rate" label="营业免运率(98%)" width="140" align="center"></el-table-column>
+        </el-table-column>
+        <el-table-column label="时间进度" align="center">
+          <el-table-column prop="target_completion_rate" label="目标完成率" width="120" align="center"></el-table-column>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <!-- 街道维度业绩明细 -->
+    <div class="chart-box" style="margin-bottom: 20px;">
+      <div class="box-title">地区维度业绩明细</div>
+      <el-table :data="streetTableData" style="width: 100%" height="500" border row-key="id">
+        <el-table-column prop="street" label="区县 / 街道" fixed="left" width="180"></el-table-column>
+        <el-table-column label="日环比" align="center">
+          <el-table-column prop="yesterday_new_shops" label="昨日新签数" width="100" align="center"></el-table-column>
+          <el-table-column prop="yesterday_new_gmv" label="昨日新签GMV" width="120" align="center"></el-table-column>
+          <el-table-column prop="yesterday_b1_rate" label="营业B1率(98%)" width="130" align="center"></el-table-column>
+          <el-table-column prop="yesterday_b2_gt2_rate" label="营业B2率大于2(68%)" width="160" align="center"></el-table-column>
+          <el-table-column prop="yesterday_free_shipping_rate" label="营业免运费率(98%)" width="160" align="center"></el-table-column>
+        </el-table-column>
+        <el-table-column label="本月数据" align="center">
+          <el-table-column prop="month_new_shops" label="本月新签数" width="100" align="center"></el-table-column>
+          <el-table-column prop="month_new_gmv" label="本月新签GMV" width="120" align="center"></el-table-column>
+          <el-table-column prop="total_shops" label="带店数" width="100" align="center"></el-table-column>
+          <el-table-column prop="month_gmv" label="本月GMV" width="120" align="center"></el-table-column>
+        </el-table-column>
+        <el-table-column label="基础覆盖率" align="center">
+          <el-table-column prop="operate_rate" label="营业率" width="100" align="center"></el-table-column>
+          <el-table-column prop="operate_sales_rate" label="营业动销率" width="120" align="center"></el-table-column>
+          <el-table-column prop="month_b1_rate" label="营业B1率(98%)" width="130" align="center"></el-table-column>
+          <el-table-column prop="month_b2_rate" label="营业B2率" width="100" align="center"></el-table-column>
+          <el-table-column prop="month_b2_gt2_rate" label="营业B2率大于2(68%)" width="160" align="center"></el-table-column>
+          <el-table-column prop="month_free_shipping_rate" label="营业免运率(98%)" width="140" align="center"></el-table-column>
+        </el-table-column>
+        <el-table-column label="时间进度" align="center">
+          <el-table-column prop="target_completion_rate" label="目标完成率" width="120" align="center"></el-table-column>
+        </el-table-column>
+      </el-table>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, onMounted } = Vue;
+    const { ElMessage } = ElementPlus;
+
+    createApp({
+      setup() {
+        const kpis = ref([
+          { title: '...', val: '-', trend: 0, unit: '' },
+          { title: '...', val: '-', trend: 0, unit: '' },
+          { title: '...', val: '-', trend: 0, unit: '' },
+          { title: '...', val: '-', trend: 0, unit: '' },
+        ]);
+        const bdTableData = ref([]);
+        const streetTableData = ref([]);
+
+        let lineChart, areaChart, barChart, pieChart;
+
+        const initCharts = () => {
+          lineChart = echarts.init(document.getElementById('lineChart'), 'dark');
+          areaChart = echarts.init(document.getElementById('areaChart'), 'dark');
+          barChart = echarts.init(document.getElementById('barChart'), 'dark');
+          pieChart = echarts.init(document.getElementById('pieChart'), 'dark');
+        }
+
+        const fetchData = async () => {
+          try {
+            const res = await axios.get('/api/dashboard/stats');
+            if (res.data.status === 'ok') {
+              const data = res.data.data;
+              kpis.value = data.kpis;
+              bdTableData.value = data.bdTableData || [];
+              streetTableData.value = data.streetTableData || [];
+              
+              lineChart.setOption({
+                backgroundColor: 'transparent',
+                tooltip: { trigger: 'axis' },
+                xAxis: { type: 'category', data: data.dates, axisLine: { lineStyle: { color: '#5470c6' } } },
+                yAxis: { type: 'value', splitLine: { lineStyle: { color: '#1f2940' } } },
+                series: [{ data: data.newShops, name: '新签门店数', type: 'line', smooth: true, itemStyle: { color: '#00f2fe' }, areaStyle: {
+                  color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: 'rgba(0, 242, 254, 0.5)' }, { offset: 1, color: 'rgba(0, 242, 254, 0)' }
+                  ])
+                }}]
+              });
+
+              areaChart.setOption({
+                backgroundColor: 'transparent',
+                tooltip: { trigger: 'axis' },
+                xAxis: { type: 'category', data: data.dates, axisLine: { lineStyle: { color: '#91cc75' } } },
+                yAxis: { type: 'value', splitLine: { lineStyle: { color: '#1f2940' } } },
+                series: [{ data: data.gmvs, name: 'GMV(元)', type: 'line', smooth: true, itemStyle: { color: '#4facfe' }, areaStyle: {
+                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                      { offset: 0, color: 'rgba(79, 172, 254, 0.6)' }, { offset: 1, color: 'rgba(79, 172, 254, 0)' }
+                    ])
+                }}]
+              });
+
+              barChart.setOption({
+                backgroundColor: 'transparent',
+                tooltip: { trigger: 'axis' },
+                grid: { left: '25%', right: '5%', bottom: '5%', top: '5%' },
+                xAxis: { type: 'value', splitLine: { show: false } },
+                yAxis: { type: 'category', data: data.bdRank.names.reverse(), axisLine: { show: false } },
+                series: [{ data: data.bdRank.values.reverse(), type: 'bar', itemStyle: {
+                   borderRadius: [0, 5, 5, 0],
+                   color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
+                     { offset: 0, color: '#f77062' }, { offset: 1, color: '#fe5196' }
+                   ])
+                }}]
+              });
+
+              pieChart.setOption({
+                backgroundColor: 'transparent',
+                tooltip: { trigger: 'item' },
+                legend: { bottom: '0%', textStyle: { color: '#ccc' } },
+                series: [{
+                  name: '活动分布', type: 'pie', radius: ['40%', '70%'],
+                  itemStyle: { borderRadius: 10, borderColor: '#0f1222', borderWidth: 2 },
+                  data: data.activityDist
+                }]
+              });
+            }
+          } catch (e) {
+            console.error('Fetch data failed', e);
+          }
+        }
+
+        const handleUploadSuccess = (response) => {
+          if (response && response.status === 'error') {
+            ElMessage.error('数据导入失败: ' + response.message);
+          } else {
+            ElMessage.success('数据导入成功！');
+            fetchData();
+          }
+        }
+
+        const handleUploadError = () => { ElMessage.error('数据导入失败验证。'); }
+
+        onMounted(() => {
+          initCharts();
+          fetchData();
+          window.addEventListener('resize', () => {
+            lineChart.resize(); areaChart.resize(); barChart.resize(); pieChart.resize();
+          });
+        });
+
+        return { kpis, bdTableData, streetTableData, handleUploadSuccess, handleUploadError }
+      }
+    }).use(ElementPlus).mount('#app');
+  </script>
+</body>
+</html>

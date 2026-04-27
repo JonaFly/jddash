@@ -1,0 +1,17 @@
+INFO:     Started server process [45935]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:56832 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56832 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56832 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:56833 - "POST /api/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56833 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60416 - "GET / HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:60416 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63031 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63031 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [45935]
