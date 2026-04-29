@@ -172,17 +172,85 @@ def get_dashboard_stats():
     # Active BDs: those with stores on the latest day
     active_bds = [b for b in td['bd_name'].dropna().unique() if b and str(b) not in ('None','nan','')]
 
+    # New-sign pool: shops built this month + audit passed
     def signed_pool(d):
         if d.empty: return pd.DataFrame()
         m = d['stat_date'].iloc[0].replace(day=1)
         return d[(d['create_time'] >= m) & (d['audit_status'].astype(str).str.contains('审核通过'))]
 
+    # Rate calculator for a group of shops
+    def calc_rates(grp):
+        total = len(grp)
+        if total == 0:
+            return 0, 0, 0, 0
+        ops = grp[grp['is_operating'] == '是']
+        n_ops = len(ops)
+        op_rate = n_ops / total
+        b1_rate = (ops['is_b1'] == '是').sum() / n_ops if n_ops > 0 else 0
+        b2_rate = (ops['is_b2'] == '是').sum() / n_ops if n_ops > 0 else 0
+        fs_rate = (ops['shipping_discount'] >= 2.7).sum() / n_ops if n_ops > 0 else 0
+        return op_rate, b1_rate, b2_rate, fs_rate
+
+    # Format rate change as "+X.XX%" or "-X.XX%"
+    def fmt_rate_delta(today_rate, yest_rate):
+        delta = (today_rate - yest_rate) * 100
+        return f"{delta:+.2f}%"
+
+    # Build a full row of data for any dimension (BD or district/street)
+    def build_row(today_grp, yest_grp, month_grp):
+        # Daily new signs = INCREMENT: today's pool - yesterday's pool
+        ns_today = signed_pool(today_grp)
+        ns_yest = signed_pool(yest_grp)
+
+        today_ids = set(ns_today['shop_id'].tolist()) if not ns_today.empty else set()
+        yest_ids = set(ns_yest['shop_id'].tolist()) if not ns_yest.empty else set()
+        new_today_ids = today_ids - yest_ids  # shops that are NEW today
+
+        daily_new_shops = len(new_today_ids)
+        if new_today_ids and not ns_today.empty:
+            daily_new_gmv = round(float(ns_today[ns_today['shop_id'].isin(new_today_ids)]['actual_pay'].sum()), 2)
+        else:
+            daily_new_gmv = 0
+
+        # Month cumulative new signs (total pool size on latest day)
+        month_new_shops = len(today_ids)
+        month_new_gmv = round(float(ns_today['actual_pay'].sum()), 2) if not ns_today.empty else 0
+
+        total_shops = len(today_grp)
+        month_gmv = round(float(month_grp['actual_pay'].sum()), 2) if not month_grp.empty else 0
+
+        # Today's rates
+        op_t, b1_t, b2_t, fs_t = calc_rates(today_grp)
+        # Yesterday's rates (for day-over-day change)
+        op_y, b1_y, b2_y, fs_y = calc_rates(yest_grp) if not yest_grp.empty else (0, 0, 0, 0)
+
+        return {
+            "yesterday_new_shops": daily_new_shops,
+            "yesterday_new_gmv": daily_new_gmv,
+            "yesterday_b1_rate": fmt_rate_delta(b1_t, b1_y),
+            "yesterday_b2_gt2_rate": "-",   # skip for now
+            "yesterday_free_shipping_rate": fmt_rate_delta(fs_t, fs_y),
+            "month_new_shops": month_new_shops,
+            "month_new_gmv": month_new_gmv,
+            "total_shops": total_shops,
+            "month_gmv": month_gmv,
+            "operate_rate": f"{op_t*100:.2f}%",
+            "operate_sales_rate": "-",      # skip for now
+            "month_b1_rate": f"{b1_t*100:.2f}%",
+            "month_b2_rate": f"{b2_t*100:.2f}%",
+            "month_b2_gt2_rate": "-",       # skip for now
+            "month_free_shipping_rate": f"{fs_t*100:.2f}%",
+            "target_completion_rate": "-"
+        }
+
+    # ── Global KPIs ──
     shops = len(td[td['is_operating'] == '是'])
     gmv = float(md['actual_pay'].sum())
-    ns = len(signed_pool(td))
-    ng = float(md[md['first_operate_time'] >= ms]['actual_pay'].sum())
+    ns_pool = signed_pool(td)
+    ns = len(ns_pool)
+    ng = round(float(ns_pool['actual_pay'].sum()), 2) if not ns_pool.empty else 0
 
-    # Trend chart
+    # ── Trend chart ──
     dates = sorted(df['stat_date'].unique())[-14:]
     cd, cn, cg = [], [], []
     for i, d in enumerate(dates):
@@ -196,68 +264,112 @@ def get_dashboard_stats():
         else:
             cn.append(0)
 
-    # BD Ranking (active only)
+    # ── BD Ranking (active only) ──
     rk = md[md['bd_name'].isin(active_bds)].groupby('bd_name')['actual_pay'].sum().reset_index()
     rk = rk.sort_values('actual_pay', ascending=False).head(10)
 
-    # Activity Distribution
-    ops_td = td[td['is_operating'] == '是']
-    b1c = int((ops_td['is_b1'] == '是').sum())
-    b2c = int((ops_td['is_b2'] == '是').sum())
-    fsc = int((ops_td['shipping_discount'] >= 2.7).sum())
-
-    # BD Detail Table
+    # ── BD Detail Table ──
     bt = []
     for bn in active_bds:
         bg = df[df['bd_name'] == bn]
         tg = bg[bg['stat_date'] == max_date]
-        mg = bg[bg['stat_date'] >= ms]
         yg = bg[bg['stat_date'] == yd]
-        ms_t = len(signed_pool(tg))
-        ms_y = len(signed_pool(yg))
-        ot = tg[tg['is_operating'] == '是']
-        opr = len(ot)/len(tg) if len(tg) > 0 else 0
-        b1r = (ot['is_b1'] == '是').sum()/len(ot) if len(ot) > 0 else 0
-        b2r = (ot['is_b2'] == '是').sum()/len(ot) if len(ot) > 0 else 0
-        fsr = (ot['shipping_discount'] >= 2.7).sum()/len(ot) if len(ot) > 0 else 0
-        bt.append({
-            "bd_name": bn,
-            "yesterday_new_shops": max(0, ms_t - ms_y),
-            "yesterday_new_gmv": round(float(yg['actual_pay'].sum()), 2) if not yg.empty else 0,
-            "month_new_shops": ms_t,
-            "total_shops": len(tg),
-            "month_gmv": round(float(mg['actual_pay'].sum()), 2),
-            "operate_rate": f"{opr*100:.2f}%",
-            "month_b1_rate": f"{b1r*100:.2f}%",
-            "yesterday_b1_rate": "+0.00%",
-            "month_b2_rate": f"{b2r*100:.2f}%",
-            "month_free_shipping_rate": f"{fsr*100:.2f}%",
-            "target_completion_rate": "-"
-        })
+        mg = bg[bg['stat_date'] >= ms]
+        row = build_row(tg, yg, mg)
+        row["bd_name"] = bn
+        bt.append(row)
 
-    # District/Street Tree (from stores table join)
+    # ── District/Street Tree ──
     st = []
     uid = 0
-    td_with_loc = td.dropna(subset=['district'])
-    for dn, dg in td_with_loc.groupby('district'):
+    td_loc = td.dropna(subset=['district'])
+    for dn, dg_today in td_loc.groupby('district'):
         if not dn or str(dn) in ('None','nan',''): continue
         uid += 1
-        dmg = df[(df['district'] == dn) & (df['stat_date'] >= ms)]
-        dop = len(dg[dg['is_operating'] == '是'])/len(dg) if len(dg) > 0 else 0
-        row = {"id": uid, "street": str(dn), "total_shops": len(dg),
-               "month_gmv": round(float(dmg['actual_pay'].sum()), 2),
-               "operate_rate": f"{dop*100:.2f}%",
-               "month_new_shops": len(signed_pool(dg)), "children": []}
-        for sn_name, sg in dg.groupby('street'):
+        dg_yest = yd_df[yd_df['district'] == dn] if not yd_df.empty else pd.DataFrame()
+        dg_month = md[md['district'] == dn]
+        row_d = build_row(dg_today, dg_yest, dg_month)
+        row_d["id"] = uid
+        row_d["street"] = str(dn)
+        row_d["children"] = []
+        for sn_name, sg_today in dg_today.groupby('street'):
             if not sn_name or str(sn_name) in ('None','nan',''): continue
             uid += 1
-            smg = df[(df['street'] == sn_name) & (df['stat_date'] >= ms)]
-            sop = len(sg[sg['is_operating'] == '是'])/len(sg) if len(sg) > 0 else 0
-            row['children'].append({"id": uid, "street": str(sn_name), "total_shops": len(sg),
-                "month_gmv": round(float(smg['actual_pay'].sum()), 2),
-                "operate_rate": f"{sop*100:.2f}%",
-                "month_new_shops": len(signed_pool(sg))})
-        st.append(row)
+            sg_yest = yd_df[(yd_df['district'] == dn) & (yd_df['street'] == sn_name)] if not yd_df.empty else pd.DataFrame()
+            sg_month = md[(md['district'] == dn) & (md['street'] == sn_name)]
+            row_s = build_row(sg_today, sg_yest, sg_month)
+            row_s["id"] = uid
+            row_s["street"] = str(sn_name)
+            row_d["children"].append(row_s)
+        st.append(row_d)
+
+    # ── 营业对比: Non-operating shop analysis per BD ──
+    # All approved shops on latest day
+    approved_td = td[td['audit_status'].astype(str).str.contains('审核通过')]
+    not_operating = approved_td[approved_td['is_operating'] != '是']
+
+    # New shops: built this month; Old shops: built before this month
+    new_not_op = not_operating[not_operating['create_time'] >= ms]
+    old_not_op = not_operating[not_operating['create_time'] < ms]
+
+    # Calculate consecutive non-operating days for each non-operating shop
+    all_dates_sorted = sorted(df['stat_date'].unique(), reverse=True)  # newest first
+    non_op_details = []
+
+    for _, shop_row in not_operating.iterrows():
+        sid = shop_row['shop_id']
+        # Look through historical data for this shop to find last operating day
+        consec_days = 1  # at least today
+        for i, hist_date in enumerate(all_dates_sorted):
+            if hist_date == max_date:
+                continue  # skip today, we already know it's not operating
+            hist_row = df[(df['shop_id'] == sid) & (df['stat_date'] == hist_date)]
+            if hist_row.empty:
+                continue  # no data for this date, skip
+            if hist_row.iloc[0]['is_operating'] == '是':
+                # Found the last operating day
+                consec_days = (max_date - hist_date).days
+                break
+            else:
+                consec_days = (max_date - hist_date).days + 1
+
+        non_op_details.append({
+            'shop_id': str(sid),
+            'shop_name': str(shop_row.get('shop_name', '')),
+            'bd_name': str(shop_row.get('bd_name', '')),
+            'is_new': shop_row['create_time'] >= ms if pd.notna(shop_row['create_time']) else False,
+            'consec_days': consec_days
+        })
+
+    # Build the BD-level tree for 营业对比
+    biz_compare = []
+    for bn in active_bds:
+        bd_details = [d for d in non_op_details if d['bd_name'] == bn]
+        new_count = sum(1 for d in bd_details if d['is_new'])
+        old_count = sum(1 for d in bd_details if not d['is_new'])
+        # Calculate operating rate for this BD
+        bd_td = td[td['bd_name'] == bn]
+        bd_ops = len(bd_td[bd_td['is_operating'] == '是'])
+        bd_total = len(bd_td)
+        op_rate = f"{bd_ops/bd_total*100:.2f}%" if bd_total > 0 else "0.00%"
+
+        children = [{
+            'shop_id': d['shop_id'],
+            'shop_name': d['shop_name'],
+            'bd_name': d['bd_name'],
+            'consec_days': d['consec_days'],
+            'is_new': '新店' if d['is_new'] else '老店'
+        } for d in bd_details]
+        # Sort by consec_days descending (riskiest first)
+        children.sort(key=lambda x: x['consec_days'], reverse=True)
+
+        biz_compare.append({
+            'bd_name': bn,
+            'new_count': new_count,
+            'old_count': old_count,
+            'operate_rate': op_rate,
+            'children': children
+        })
 
     return {
         "status": "ok",
@@ -270,12 +382,10 @@ def get_dashboard_stats():
             ],
             "dates": cd, "newShops": cn, "gmvs": cg,
             "bdRank": {"names": rk['bd_name'].tolist(), "values": [int(v) for v in rk['actual_pay'].tolist()]},
-            "activityDist": [
-                {"value": b1c, "name": "B1活动"}, {"value": b2c, "name": "B2活动"},
-                {"value": fsc, "name": "免运活动"}, {"value": max(0, shops-b1c), "name": "其他"}
-            ],
+            "bizCompare": biz_compare,
             "bdTableData": bt, "streetTableData": st
         }
     }
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
+

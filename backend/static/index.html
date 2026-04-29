@@ -114,9 +114,45 @@
         <div class="box-title">BD业绩排行TOP10 (GMV)</div>
         <div id="barChart" class="chart"></div>
       </div>
-      <div class="chart-box">
-        <div class="box-title">活动覆盖率分布</div>
-        <div id="pieChart" class="chart"></div>
+      <div class="chart-box" style="overflow: auto;">
+        <div class="box-title">营业对比</div>
+        <el-table :data="bizCompare" style="width: 100%" border row-key="bd_name"
+          :tree-props="{ children: 'children' }">
+          <el-table-column prop="bd_name" label="BD" width="120" align="center">
+            <template #default="{ row }">
+              {{ row.bd_name || '' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="未营业门店数" align="center">
+            <el-table-column prop="new_count" label="新店数" width="90" align="center">
+              <template #default="{ row }">
+                {{ row.new_count !== undefined ? row.new_count : (row.is_new || '') }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="old_count" label="老店数" width="90" align="center">
+              <template #default="{ row }">
+                {{ row.old_count !== undefined ? row.old_count : '' }}
+              </template>
+            </el-table-column>
+          </el-table-column>
+          <el-table-column label="门店明细" align="center">
+            <el-table-column prop="shop_id" label="门店id" width="120" align="center"></el-table-column>
+            <el-table-column prop="shop_name" label="门店名称" width="180" align="center"></el-table-column>
+            <el-table-column label="BD" width="100" align="center">
+              <template #default="{ row }">
+                {{ row.children ? '' : row.bd_name }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="consec_days" label="连续未营业天数" width="130" align="center">
+              <template #default="{ row }">
+                <span v-if="row.consec_days" :style="{ color: row.consec_days >= 7 ? '#ff4d4f' : row.consec_days >= 3 ? '#faad14' : '#52c41a' }">
+                  {{ row.consec_days }}天
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="operate_rate" label="营业率" width="100" align="center"></el-table-column>
+          </el-table-column>
+        </el-table>
       </div>
     </div>
 
@@ -203,14 +239,14 @@
         ]);
         const bdTableData = ref([]);
         const streetTableData = ref([]);
+        const bizCompare = ref([]);
 
-        let lineChart, areaChart, barChart, pieChart;
+        let lineChart, areaChart, barChart;
 
         const initCharts = () => {
           lineChart = echarts.init(document.getElementById('lineChart'), 'dark');
           areaChart = echarts.init(document.getElementById('areaChart'), 'dark');
           barChart = echarts.init(document.getElementById('barChart'), 'dark');
-          pieChart = echarts.init(document.getElementById('pieChart'), 'dark');
         }
 
         const fetchData = async () => {
@@ -221,6 +257,7 @@
               kpis.value = data.kpis;
               bdTableData.value = data.bdTableData || [];
               streetTableData.value = data.streetTableData || [];
+              bizCompare.value = data.bizCompare || [];
               
               lineChart.setOption({
                 backgroundColor: 'transparent',
@@ -260,16 +297,6 @@
                 }}]
               });
 
-              pieChart.setOption({
-                backgroundColor: 'transparent',
-                tooltip: { trigger: 'item' },
-                legend: { bottom: '0%', textStyle: { color: '#ccc' } },
-                series: [{
-                  name: '活动分布', type: 'pie', radius: ['40%', '70%'],
-                  itemStyle: { borderRadius: 10, borderColor: '#0f1222', borderWidth: 2 },
-                  data: data.activityDist
-                }]
-              });
             }
           } catch (e) {
             console.error('Fetch data failed', e);
@@ -291,11 +318,11 @@
           initCharts();
           fetchData();
           window.addEventListener('resize', () => {
-            lineChart.resize(); areaChart.resize(); barChart.resize(); pieChart.resize();
+            lineChart.resize(); areaChart.resize(); barChart.resize();
           });
         });
 
-        return { kpis, bdTableData, streetTableData, handleUploadSuccess, handleUploadError }
+        return { kpis, bdTableData, streetTableData, bizCompare, handleUploadSuccess, handleUploadError }
       }
     }).use(ElementPlus).mount('#app');
   </script>
