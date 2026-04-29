@@ -3,281 +3,278 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import create_engine, text
-import io
-import os
+import io, datetime
 
 app = FastAPI(title="BD Dashboard API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 DB_PATH = "sqlite:///app.db"
 engine = create_engine(DB_PATH)
 
-# Initialize tables if not exist
+# ─── Initialize 3 tables ───
 with engine.connect() as conn:
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS records (
-        stat_date DATE,
-        shop_id VARCHAR(100),
-        shop_name VARCHAR(255),
-        bd_name VARCHAR(100),
-        district VARCHAR(100),
-        street VARCHAR(100),
-        is_operating VARCHAR(10),
-        is_b1 VARCHAR(10),
-        is_b2 VARCHAR(10),
-        shipping_discount FLOAT,
-        first_operate_time DATE,
-        actual_pay FLOAT,
-        create_time DATE,
-        audit_status VARCHAR(50)
-    )
-    """))
+    # Table 1: Store master (from 影刀-商户详情) - imported once
+    conn.execute(text("""CREATE TABLE IF NOT EXISTS stores (
+        shop_id TEXT PRIMARY KEY, shop_name TEXT,
+        province TEXT, city TEXT, district TEXT, street TEXT, address TEXT
+    )"""))
+    # Table 2: BD mapping (from BD sheet) - imported once
+    conn.execute(text("""CREATE TABLE IF NOT EXISTS bd_map (
+        shop_id TEXT PRIMARY KEY, bd_name TEXT
+    )"""))
+    # Table 3: Daily channel data (from 渠道/daily file) - imported daily
+    conn.execute(text("""CREATE TABLE IF NOT EXISTS daily (
+        stat_date DATE, shop_id TEXT, shop_name TEXT,
+        is_operating TEXT, is_b1 TEXT, is_b2 TEXT,
+        shipping_discount REAL, first_operate_time DATE, actual_pay REAL,
+        create_time DATE, audit_status TEXT
+    )"""))
     conn.commit()
 
-@app.post("/api/upload")
-async def upload_excel(file: UploadFile = File(...)):
+# ─── Upload 1: Store master + BD mapping (from 11.xlsx) ───
+@app.post("/api/upload/master")
+async def upload_master(file: UploadFile = File(...)):
     try:
         contents = await file.read()
-        try:
-            xl = pd.ExcelFile(io.BytesIO(contents))
-            target_sheet = 0
+        xl = pd.ExcelFile(io.BytesIO(contents))
+        msgs = []
+
+        # --- 影刀-商户详情 ---
+        if '影刀-商户详情' in xl.sheet_names:
+            df = xl.parse('影刀-商户详情')
+            df.columns = [str(c).strip() for c in df.columns]
+            store_df = pd.DataFrame()
+            store_df['shop_id'] = df['门店ID'].astype(str).str.strip()
+            store_df['shop_name'] = df.get('门店名称', '')
+            store_df['province'] = df.get('省', '')
+            store_df['city'] = df.get('市', '')
+            store_df['district'] = df.get('区县', '')
+            store_df['street'] = df.get('街道', '')
+            store_df['address'] = df.get('详细地址', '')
+            for c in store_df.select_dtypes(include=['object']).columns:
+                store_df[c] = store_df[c].astype(str).str.strip()
+                store_df.loc[store_df[c].isin(['nan','None','']), c] = None
+            store_df = store_df.dropna(subset=['shop_id'])
+            store_df = store_df.drop_duplicates(subset=['shop_id'])
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM stores"))
+            store_df.to_sql('stores', con=engine, if_exists='append', index=False)
+            msgs.append(f"门店主数据: {len(store_df)} 条")
+
+        # --- BD sheet ---
+        if 'BD' in xl.sheet_names:
+            df = xl.parse('BD')
+            df.columns = [str(c).strip() for c in df.columns]
+            bd_df = pd.DataFrame()
+            bd_df['shop_id'] = df['门店id'].astype(str).str.strip()
+            bd_raw = df['BD'].astype(str).str.strip()
+            # Remove ERP suffix like (ext.xxx)
+            bd_df['bd_name'] = bd_raw.str.replace(r'\(.*?\)', '', regex=True).str.strip()
+            bd_df.loc[bd_df['bd_name'].isin(['nan','None','']), 'bd_name'] = None
+            bd_df = bd_df.dropna(subset=['shop_id', 'bd_name'])
+            bd_df = bd_df.drop_duplicates(subset=['shop_id'], keep='last')
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM bd_map"))
+            bd_df.to_sql('bd_map', con=engine, if_exists='append', index=False)
+            msgs.append(f"BD映射: {len(bd_df)} 条, {bd_df['bd_name'].nunique()} 个BD")
+
+        return {"status": "ok", "message": "导入成功! " + "; ".join(msgs)}
+    except Exception as e:
+        import traceback
+        return {"status": "error", "message": traceback.format_exc()}
+
+# ─── Upload 2: Daily channel data (渠道 file, uploaded daily) ───
+@app.post("/api/upload")
+async def upload_daily(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        xl = pd.ExcelFile(io.BytesIO(contents))
+
+        # Find the right sheet: prefer '渠道', or first sheet with '日期' column  
+        target_sheet = None
+        if '渠道' in xl.sheet_names:
+            target_sheet = '渠道'
+        else:
             for sn in xl.sheet_names:
-                if '数据' in sn and '3合一' in sn and '前一天' not in sn:
+                test = xl.parse(sn, nrows=1)
+                test.columns = [str(c).strip() for c in test.columns]
+                if '日期' in test.columns and '门店id' in test.columns:
                     target_sheet = sn
                     break
-            df = xl.parse(target_sheet)
-        except Exception:
-            df = pd.read_excel(io.BytesIO(contents))
-        
-        col_mapping = {
-            '日期': 'stat_date',
-            '门店id': 'shop_id', '商家id': 'shop_id', '门店ID': 'shop_id', '商家ID': 'shop_id',
-            '门店名称': 'shop_name', '商家名称': 'shop_name',
-            '业务经理': 'bd_name', 
-            '区县': 'district', '区县名称': 'district',
-            '街道': 'street',
-            '门店是否营业': 'is_operating',
-            '是否券B1活动报名': 'is_b1',
-            '是否券B2新客加补活动报名': 'is_b2',
-            '最低运费减免金额': 'shipping_discount',
-            '门店首营时间': 'first_operate_time',
-            '实付GMV': 'actual_pay',
-            '门店建店日期': 'create_time',
-            '门店资质审核状态': 'audit_status'
-        }
-        
-        final_df = pd.DataFrame()
-        # Strictly prefer '业务经理' for the salesperson BD field if it exists
-        if '业务经理' in df.columns:
-            final_df['bd_name'] = df['业务经理']
-            
-        for excel_col in df.columns:
-            clean_col = str(excel_col).strip()
-            if clean_col in col_mapping:
-                target = col_mapping[clean_col]
-                # If we already set bd_name from '业务经理', don't let 'BD名称' overwrite it
-                if target == 'bd_name' and 'bd_name' in final_df.columns and clean_col != '业务经理':
-                    continue
-                if target in final_df.columns:
-                    if df[excel_col].count() > final_df[target].count():
-                        final_df[target] = df[excel_col]
-                else:
-                    final_df[target] = df[excel_col]
-        df = final_df
-        
-        db_cols = ['stat_date', 'shop_id', 'shop_name', 'bd_name', 'district', 'street', 
-                   'is_operating', 'is_b1', 'is_b2', 'shipping_discount', 
-                   'first_operate_time', 'actual_pay', 'create_time', 'audit_status']
-        for col in db_cols:
-            if col not in df.columns:
-                df[col] = None
-        df = df[db_cols]
+        if not target_sheet:
+            target_sheet = xl.sheet_names[0]
 
-        df['stat_date'] = pd.to_datetime(df['stat_date'], errors='coerce').dt.date
-        df['first_operate_time'] = pd.to_datetime(df['first_operate_time'], errors='coerce').dt.date
-        df['create_time'] = pd.to_datetime(df['create_time'], errors='coerce').dt.date
-        df['shipping_discount'] = pd.to_numeric(df['shipping_discount'], errors='coerce').fillna(0)
-        df['actual_pay'] = pd.to_numeric(df['actual_pay'], errors='coerce').fillna(0)
-        
-        df = df.dropna(subset=['stat_date'])
-        
-        uploaded_dates = df['stat_date'].unique().tolist()
-        if uploaded_dates:
-            with engine.begin() as conn:
-                dates_str = ",".join([f"'{d}'" for d in uploaded_dates])
-                conn.execute(text(f"DELETE FROM records WHERE stat_date IN ({dates_str})"))
-        
-        df.to_sql('records', con=engine, if_exists='append', index=False)
-        return {"status": "ok", "message": f"Successfully imported {len(df)} rows into database."}
+        df = xl.parse(target_sheet)
+        df.columns = [str(c).strip() for c in df.columns]
+
+        w = pd.DataFrame()
+        w['stat_date'] = pd.to_datetime(df.get('日期'), errors='coerce').dt.date
+        w['shop_id'] = df.get('门店id', df.get('商家id', '')).astype(str).str.strip()
+        w['shop_name'] = df.get('门店名称', df.get('商家名称', ''))
+        w['is_operating'] = df.get('门店是否营业', '')
+        w['is_b1'] = df.get('是否券B1活动报名', '')
+        w['is_b2'] = df.get('是否券B2新客加补活动报名', '')
+        w['shipping_discount'] = pd.to_numeric(df.get('最低运费减免金额', 0), errors='coerce').fillna(0)
+        w['first_operate_time'] = pd.to_datetime(df.get('门店首营时间'), errors='coerce').dt.date
+        w['actual_pay'] = pd.to_numeric(df.get('实付GMV', 0), errors='coerce').fillna(0)
+        w['create_time'] = pd.to_datetime(df.get('门店建店日期'), errors='coerce').dt.date
+        w['audit_status'] = df.get('门店资质审核状态', '')
+
+        for c in w.select_dtypes(include=['object']).columns:
+            w[c] = w[c].astype(str).str.strip()
+            w.loc[w[c].isin(['nan','None','']), c] = None
+
+        w = w.dropna(subset=['stat_date'])
+
+        with engine.begin() as conn:
+            for d in w['stat_date'].unique():
+                conn.execute(text(f"DELETE FROM daily WHERE stat_date = '{d}'"))
+        w.to_sql('daily', con=engine, if_exists='append', index=False)
+
+        return {"status": "ok", "message": f"渠道日报导入成功! [{target_sheet}] {len(w)} 行, 日期: {list(w['stat_date'].unique())}"}
     except Exception as e:
-        return {"status": "error", "message": f"Upload Failed: {str(e)}"}
+        import traceback
+        return {"status": "error", "message": traceback.format_exc()}
 
-@app.post("/api/upload/store")
-async def upload_store(file: UploadFile = File(...)):
-    try:
-        contents = await file.read()
-        df = pd.read_excel(io.BytesIO(contents))
-        return {"status": "ok", "message": f"Successfully imported store details: {len(df)} rows."}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
+# ─── Dashboard Stats: JOIN daily + bd_map + stores ───
 @app.get("/api/dashboard/stats")
 def get_dashboard_stats():
     try:
-        df = pd.read_sql('SELECT * FROM records', con=engine)
-    except Exception:
-        df = pd.DataFrame()
-        
-    if df.empty:
+        daily = pd.read_sql("SELECT * FROM daily", con=engine)
+        bd = pd.read_sql("SELECT * FROM bd_map", con=engine)
+        stores = pd.read_sql("SELECT shop_id, district, street FROM stores", con=engine)
+    except:
         return {"status": "ok", "data": None}
 
-    df['stat_date'] = pd.to_datetime(df['stat_date'], errors='coerce')
-    df['first_operate_time'] = pd.to_datetime(df['first_operate_time'], errors='coerce')
-    df['create_time'] = pd.to_datetime(df['create_time'], errors='coerce')
-    
+    if daily.empty:
+        return {"status": "ok", "data": None}
+
+    # VLOOKUP: Join BD and address onto daily data
+    daily['shop_id'] = daily['shop_id'].astype(str).str.strip()
+    bd['shop_id'] = bd['shop_id'].astype(str).str.strip()
+    stores['shop_id'] = stores['shop_id'].astype(str).str.strip()
+
+    df = daily.merge(bd, on='shop_id', how='left')
+    df = df.merge(stores, on='shop_id', how='left')
+
+    df['stat_date'] = pd.to_datetime(df['stat_date'])
+    df['create_time'] = pd.to_datetime(df['create_time'])
+    df['first_operate_time'] = pd.to_datetime(df['first_operate_time'])
+
     max_date = df['stat_date'].max()
-    yesterday_date = max_date - pd.Timedelta(days=1)
-    current_month = max_date.replace(day=1)
-    
-    today_df = df[df['stat_date'] == max_date]
-    month_df = df[df['stat_date'] >= current_month]
+    ms = max_date.replace(day=1)
+    yd = max_date - datetime.timedelta(days=1)
 
-    total_gmv = float(df['actual_pay'].sum())
-    shops = len(today_df[today_df['shop_id'].notnull()]['shop_id'].unique())
-    if shops == 0:
-        shops = len(today_df['shop_name'].unique()) if not today_df.empty else 0
-    
-    total_new_shops_this_month = today_df[(today_df['create_time'] >= current_month) & (today_df['audit_status'].astype(str).str.contains('审核通过'))]['shop_id'].nunique()
-    total_new_gmv_this_month = month_df[month_df['first_operate_time'] >= current_month]['actual_pay'].sum()
+    td = df[df['stat_date'] == max_date]
+    md = df[df['stat_date'] >= ms]
+    yd_df = df[df['stat_date'] == yd]
 
-    b1_count = int(((today_df['is_operating'] == '是') & (today_df['is_b1'] == '是')).sum())
-    b2_count = int(((today_df['is_operating'] == '是') & (today_df['is_b2'] == '是')).sum())
-    fs_count = int(((today_df['is_operating'] == '是') & (today_df['shipping_discount'] >= 2.7)).sum())
-    other_count = int(max(0, len(today_df[today_df['is_operating'] == '是']) - b1_count))
+    # Active BDs: those with stores on the latest day
+    active_bds = [b for b in td['bd_name'].dropna().unique() if b and str(b) not in ('None','nan','')]
 
-    df_date_grouped = df.groupby(df['stat_date'].dt.strftime('%m-%d')).agg({
-        'actual_pay': 'sum',
-        'shop_id': 'nunique'
-    }).reset_index().sort_values('stat_date').tail(14)
+    def signed_pool(d):
+        if d.empty: return pd.DataFrame()
+        m = d['stat_date'].iloc[0].replace(day=1)
+        return d[(d['create_time'] >= m) & (d['audit_status'].astype(str).str.contains('审核通过'))]
 
-    def calc_rates(grp):
-        base_shops = len(grp)
-        if base_shops == 0: return 0, 0, 0, 0
-        ops_grp = grp[grp['is_operating'] == '是']
-        ops = len(ops_grp)
-        op_rate = ops / base_shops if base_shops > 0 else 0
-        ops_b1 = (ops_grp['is_b1'] == '是').sum()
-        b1_rate = ops_b1 / ops if ops > 0 else 0
-        ops_b2 = (ops_grp['is_b2'] == '是').sum()
-        b2_rate = ops_b2 / ops if ops > 0 else 0
-        ops_fs = (ops_grp['shipping_discount'] >= 2.7).sum()
-        fs_rate = ops_fs / ops if ops > 0 else 0
-        return op_rate, b1_rate, b2_rate, fs_rate
+    shops = len(td[td['is_operating'] == '是'])
+    gmv = float(md['actual_pay'].sum())
+    ns = len(signed_pool(td))
+    ng = float(md[md['first_operate_time'] >= ms]['actual_pay'].sum())
 
-    def get_row_data(name_key, dim_val, group):
-        today_group = group[group['stat_date'] == max_date]
-        yest_group = group[group['stat_date'] == yesterday_date]
-        month_group = group[group['stat_date'] >= current_month]
-        
-        month_gmv = month_group['actual_pay'].sum()
-        total_shops = today_group['shop_id'].nunique() if today_group['shop_id'].notnull().any() else today_group['shop_name'].nunique()
-        
-        new_shops_today = today_group[(today_group['create_time'] >= current_month) & (today_group['audit_status'].astype(str).str.contains('审核通过'))]['shop_id'].nunique()
-        new_shops_yest = yest_group[(yest_group['create_time'] >= current_month) & (yest_group['audit_status'].astype(str).str.contains('审核通过'))]['shop_id'].nunique()
-        new_shops_this_month = new_shops_today
-        yesterday_new_shops = new_shops_today - new_shops_yest
-        
-        new_gmv_this_month = month_group[month_group['first_operate_time'] >= current_month]['actual_pay'].sum()
-        yesterday_new_gmv = yest_group['actual_pay'].sum() if not yest_group.empty else 0
-        
-        op_r_t, b1_r_t, b2_r_t, fs_r_t = calc_rates(today_group)
-        op_r_y, b1_r_y, b2_r_y, fs_r_y = calc_rates(yest_group)
-        
-        return {
-            name_key: str(dim_val),
-            "yesterday_new_shops": int(yesterday_new_shops),
-            "yesterday_new_gmv": round(float(yesterday_new_gmv), 2),
-            "yesterday_b1_rate": f"{(b1_r_t - b1_r_y)*100:+.2f}%", 
-            "yesterday_b2_gt2_rate": f"{(op_r_t - op_r_y)*100:+.2f}%", 
-            "yesterday_free_shipping_rate": f"{(fs_r_t - fs_r_y)*100:+.2f}%", 
-            "month_new_shops": int(new_shops_this_month),
-            "month_new_gmv": round(float(new_gmv_this_month), 2),
-            "total_shops": int(total_shops),
-            "month_gmv": round(float(month_gmv), 2),
-            "operate_rate": f"{op_r_t*100:.2f}%",
-            "operate_sales_rate": "0.00%", 
-            "month_b1_rate": f"{b1_r_t*100:.2f}%", 
-            "month_b2_rate": f"{b2_r_t*100:.2f}%", 
-            "month_b2_gt2_rate": "-", 
-            "month_free_shipping_rate": f"{fs_r_t*100:.2f}%", 
-            "target_completion_rate": "-" 
-        }
+    # Trend chart
+    dates = sorted(df['stat_date'].unique())[-14:]
+    cd, cn, cg = [], [], []
+    for i, d in enumerate(dates):
+        dd = df[df['stat_date'] == d]
+        cd.append(pd.Timestamp(d).strftime('%m-%d'))
+        cg.append(float(dd['actual_pay'].sum()))
+        pt = len(signed_pool(dd))
+        if i > 0:
+            py = len(signed_pool(df[df['stat_date'] == dates[i-1]]))
+            cn.append(max(0, pt - py))
+        else:
+            cn.append(0)
 
-    def build_dimension_table(dimension_col, name_key):
-        table_data = []
-        if dimension_col not in df.columns: return table_data
-        for dim_val, group in df.groupby(dimension_col):
-            if pd.isna(dim_val) or str(dim_val).strip() == '': continue
-            row = get_row_data(name_key, dim_val, group)
-            table_data.append(row)
-        return table_data
-        
-    def build_tree_table():
-        tree_data = []
-        if 'district' not in df.columns or 'street' not in df.columns: return tree_data
-        uid = 0
-        for dist_name, d_group in df.groupby('district'):
-            if pd.isna(dist_name) or str(dist_name).strip() == '': continue
+    # BD Ranking (active only)
+    rk = md[md['bd_name'].isin(active_bds)].groupby('bd_name')['actual_pay'].sum().reset_index()
+    rk = rk.sort_values('actual_pay', ascending=False).head(10)
+
+    # Activity Distribution
+    ops_td = td[td['is_operating'] == '是']
+    b1c = int((ops_td['is_b1'] == '是').sum())
+    b2c = int((ops_td['is_b2'] == '是').sum())
+    fsc = int((ops_td['shipping_discount'] >= 2.7).sum())
+
+    # BD Detail Table
+    bt = []
+    for bn in active_bds:
+        bg = df[df['bd_name'] == bn]
+        tg = bg[bg['stat_date'] == max_date]
+        mg = bg[bg['stat_date'] >= ms]
+        yg = bg[bg['stat_date'] == yd]
+        ms_t = len(signed_pool(tg))
+        ms_y = len(signed_pool(yg))
+        ot = tg[tg['is_operating'] == '是']
+        opr = len(ot)/len(tg) if len(tg) > 0 else 0
+        b1r = (ot['is_b1'] == '是').sum()/len(ot) if len(ot) > 0 else 0
+        b2r = (ot['is_b2'] == '是').sum()/len(ot) if len(ot) > 0 else 0
+        fsr = (ot['shipping_discount'] >= 2.7).sum()/len(ot) if len(ot) > 0 else 0
+        bt.append({
+            "bd_name": bn,
+            "yesterday_new_shops": max(0, ms_t - ms_y),
+            "yesterday_new_gmv": round(float(yg['actual_pay'].sum()), 2) if not yg.empty else 0,
+            "month_new_shops": ms_t,
+            "total_shops": len(tg),
+            "month_gmv": round(float(mg['actual_pay'].sum()), 2),
+            "operate_rate": f"{opr*100:.2f}%",
+            "month_b1_rate": f"{b1r*100:.2f}%",
+            "yesterday_b1_rate": "+0.00%",
+            "month_b2_rate": f"{b2r*100:.2f}%",
+            "month_free_shipping_rate": f"{fsr*100:.2f}%",
+            "target_completion_rate": "-"
+        })
+
+    # District/Street Tree (from stores table join)
+    st = []
+    uid = 0
+    td_with_loc = td.dropna(subset=['district'])
+    for dn, dg in td_with_loc.groupby('district'):
+        if not dn or str(dn) in ('None','nan',''): continue
+        uid += 1
+        dmg = df[(df['district'] == dn) & (df['stat_date'] >= ms)]
+        dop = len(dg[dg['is_operating'] == '是'])/len(dg) if len(dg) > 0 else 0
+        row = {"id": uid, "street": str(dn), "total_shops": len(dg),
+               "month_gmv": round(float(dmg['actual_pay'].sum()), 2),
+               "operate_rate": f"{dop*100:.2f}%",
+               "month_new_shops": len(signed_pool(dg)), "children": []}
+        for sn_name, sg in dg.groupby('street'):
+            if not sn_name or str(sn_name) in ('None','nan',''): continue
             uid += 1
-            row_d = get_row_data('street', dist_name, d_group)
-            row_d['id'] = uid
-            children = []
-            for st_name, s_group in d_group.groupby('street'):
-                if pd.isna(st_name) or str(st_name).strip() == '': continue
-                uid += 1
-                row_s = get_row_data('street', st_name, s_group)
-                row_s['id'] = uid
-                children.append(row_s)
-            row_d['children'] = children
-            if len(children) > 0: tree_data.append(row_d)
-        return tree_data
-
-    bd_table_data = build_dimension_table('bd_name', 'bd_name')
-    street_table_data = build_tree_table()
-    
-    bd_names, bd_values = [], []
-    if 'bd_name' in df.columns:
-        bd_grouped = month_df.groupby('bd_name')['actual_pay'].sum().reset_index().sort_values('actual_pay', ascending=False).head(10)
-        bd_names = bd_grouped['bd_name'].tolist()
-        bd_values = [int(v) for v in bd_grouped['actual_pay'].tolist()]
+            smg = df[(df['street'] == sn_name) & (df['stat_date'] >= ms)]
+            sop = len(sg[sg['is_operating'] == '是'])/len(sg) if len(sg) > 0 else 0
+            row['children'].append({"id": uid, "street": str(sn_name), "total_shops": len(sg),
+                "month_gmv": round(float(smg['actual_pay'].sum()), 2),
+                "operate_rate": f"{sop*100:.2f}%",
+                "month_new_shops": len(signed_pool(sg))})
+        st.append(row)
 
     return {
         "status": "ok",
         "data": {
             "kpis": [
-                { "title": '当前累计营业商户', "val": str(shops), "trend": 0, "unit": '家' },
-                { "title": '当前累计总GMV', "val": f"{total_gmv:,.0f}", "trend": 0, "unit": '元' },
-                { "title": '当月新签营业数', "val": str(total_new_shops_this_month), "trend": 0, "unit": '家' },
-                { "title": '当月新签GMV', "val": f"{total_new_gmv_this_month:,.0f}", "trend": 0, "unit": '元' },
+                {"title": "当前累计营业商户", "val": str(shops), "unit": "家"},
+                {"title": "当月累计总GMV", "val": f"{gmv:,.0f}", "unit": "元"},
+                {"title": "当月新签营业数", "val": str(ns), "unit": "家"},
+                {"title": "当月新签GMV", "val": f"{ng:,.0f}", "unit": "元"},
             ],
-            "dates": df_date_grouped['stat_date'].tolist(),
-            "newShops": df_date_grouped['shop_id'].tolist(),
-            "gmvs": df_date_grouped['actual_pay'].tolist(),
-            "bdRank": {"names": bd_names, "values": bd_values},
+            "dates": cd, "newShops": cn, "gmvs": cg,
+            "bdRank": {"names": rk['bd_name'].tolist(), "values": [int(v) for v in rk['actual_pay'].tolist()]},
             "activityDist": [
-                {"value": b1_count, "name": 'B1活动'},
-                {"value": b2_count, "name": 'B2活动'},
-                {"value": fs_count, "name": '免运活动'},
-                {"value": other_count, "name": '其他'}
+                {"value": b1c, "name": "B1活动"}, {"value": b2c, "name": "B2活动"},
+                {"value": fsc, "name": "免运活动"}, {"value": max(0, shops-b1c), "name": "其他"}
             ],
-            "bdTableData": bd_table_data,
-            "streetTableData": street_table_data
+            "bdTableData": bt, "streetTableData": st
         }
     }
 
