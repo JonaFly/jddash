@@ -9,10 +9,12 @@ app = FastAPI(title="BD Dashboard API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 DB_PATH = "sqlite:///app.db"
-engine = create_engine(DB_PATH)
+engine = create_engine(DB_PATH, connect_args={"timeout": 30}, pool_pre_ping=True)
 
 # ─── Initialize 3 tables ───
 with engine.connect() as conn:
+    # Enable WAL mode for concurrent reads/writes without locking
+    conn.execute(text("PRAGMA journal_mode=WAL;"))
     # Table 1: Store master (from 影刀-商户详情) - imported once
     conn.execute(text("""CREATE TABLE IF NOT EXISTS stores (
         shop_id TEXT PRIMARY KEY, shop_name TEXT,
@@ -312,26 +314,33 @@ def get_dashboard_stats():
     new_not_op = not_operating[not_operating['create_time'] >= ms]
     old_not_op = not_operating[not_operating['create_time'] < ms]
 
-    # Calculate consecutive non-operating days for each non-operating shop
-    all_dates_sorted = sorted(df['stat_date'].unique(), reverse=True)  # newest first
+    # Calculate consecutive non-operating days for each non-operating shop (OPTIMIZED)
     non_op_details = []
+    
+    # Get all shop_ids that are not operating today
+    target_ids = not_operating['shop_id'].unique()
+    
+    # Filter historical data for these shops where they WERE operating
+    hist_ops = df[(df['shop_id'].isin(target_ids)) & (df['is_operating'] == '是')]
+    
+    # Find the most recent operating date for each shop
+    last_op_dates = hist_ops.groupby('shop_id')['stat_date'].max()
+    
+    # Find the earliest date each shop appears in the dataset (if they never operated)
+    earliest_dates = df[df['shop_id'].isin(target_ids)].groupby('shop_id')['stat_date'].min()
 
     for _, shop_row in not_operating.iterrows():
         sid = shop_row['shop_id']
-        # Look through historical data for this shop to find last operating day
-        consec_days = 1  # at least today
-        for i, hist_date in enumerate(all_dates_sorted):
-            if hist_date == max_date:
-                continue  # skip today, we already know it's not operating
-            hist_row = df[(df['shop_id'] == sid) & (df['stat_date'] == hist_date)]
-            if hist_row.empty:
-                continue  # no data for this date, skip
-            if hist_row.iloc[0]['is_operating'] == '是':
-                # Found the last operating day
-                consec_days = (max_date - hist_date).days
-                break
+        
+        if sid in last_op_dates:
+            last_date = pd.to_datetime(last_op_dates[sid])
+            consec_days = (max_date - last_date).days
+        else:
+            if sid in earliest_dates:
+                earliest_date = pd.to_datetime(earliest_dates[sid])
+                consec_days = (max_date - earliest_date).days + 1
             else:
-                consec_days = (max_date - hist_date).days + 1
+                consec_days = 1 # Fallback
 
         non_op_details.append({
             'shop_id': str(sid),
