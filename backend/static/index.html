@@ -116,8 +116,10 @@
       </div>
       <div class="chart-box" style="overflow: auto;">
         <div class="box-title">营业对比</div>
-        <el-table :data="bizCompare" style="width: 100%" border row-key="bd_name"
-          :tree-props="{ children: 'children' }">
+        <el-table :data="bizCompare" style="width: 100%" border row-key="row_id"
+          :tree-props="{ children: 'children' }" max-height="500"
+          :default-sort="{prop: 'consec_days', order: 'ascending'}"
+          @sort-change="handleSortChange">
           <el-table-column prop="bd_name" label="BD" width="120" align="center">
             <template #default="{ row }">
               {{ row.bd_name || '' }}
@@ -143,7 +145,7 @@
                 {{ row.children ? '' : row.bd_name }}
               </template>
             </el-table-column>
-            <el-table-column prop="consec_days" label="连续未营业天数" width="130" align="center">
+            <el-table-column prop="consec_days" label="连续未营业天数" width="160" align="center" sortable="custom">
               <template #default="{ row }">
                 <span v-if="row.consec_days" :style="{ color: row.consec_days >= 7 ? '#ff4d4f' : row.consec_days >= 3 ? '#faad14' : '#52c41a' }">
                   {{ row.consec_days }}天
@@ -286,7 +288,7 @@
               barChart.setOption({
                 backgroundColor: 'transparent',
                 tooltip: { trigger: 'axis' },
-                grid: { left: '25%', right: '5%', bottom: '5%', top: '5%' },
+                grid: { left: '25%', right: '5%', bottom: '5%', top: '5%', containLabel: true },
                 xAxis: { type: 'value', splitLine: { show: false } },
                 yAxis: { type: 'category', data: data.bdRank.names.reverse(), axisLine: { show: false } },
                 series: [{ data: data.bdRank.values.reverse(), type: 'bar', itemStyle: {
@@ -314,6 +316,29 @@
 
         const handleUploadError = () => { ElMessage.error('数据导入失败验证。'); }
 
+        const handleSortChange = ({ prop, order }) => {
+          if (prop === 'consec_days') {
+            const currentOrder = order || 'ascending';
+            const sortTree = (nodes) => {
+              nodes.forEach(node => {
+                if (node.children && node.children.length > 0) {
+                  sortTree(node.children);
+                }
+              });
+              if (nodes.length > 0 && nodes.some(n => n.consec_days !== undefined)) {
+                nodes.sort((a, b) => {
+                  const valA = a.consec_days || 0;
+                  const valB = b.consec_days || 0;
+                  return currentOrder === 'ascending' ? valA - valB : valB - valA;
+                });
+              }
+            };
+            const newData = JSON.parse(JSON.stringify(bizCompare.value));
+            sortTree(newData);
+            bizCompare.value = newData;
+          }
+        };
+
         onMounted(() => {
           initCharts();
           fetchData();
@@ -322,7 +347,7 @@
           });
         });
 
-        return { kpis, bdTableData, streetTableData, bizCompare, handleUploadSuccess, handleUploadError }
+        return { kpis, bdTableData, streetTableData, bizCompare, handleUploadSuccess, handleUploadError, handleSortChange }
       }
     }).use(ElementPlus).mount('#app');
   </script>

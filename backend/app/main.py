@@ -362,17 +362,44 @@ def get_dashboard_stats():
         bd_total = len(bd_td)
         op_rate = f"{bd_ops/bd_total*100:.2f}%" if bd_total > 0 else "0.00%"
 
-        children = [{
+        new_children = [{
+            'row_id': f"shop_{d['shop_id']}",
             'shop_id': d['shop_id'],
             'shop_name': d['shop_name'],
             'bd_name': d['bd_name'],
             'consec_days': d['consec_days'],
-            'is_new': '新店' if d['is_new'] else '老店'
-        } for d in bd_details]
-        # Sort by consec_days descending (riskiest first)
-        children.sort(key=lambda x: x['consec_days'], reverse=True)
+            'is_new': '新店'
+        } for d in bd_details if d['is_new']]
+        new_children.sort(key=lambda x: x['consec_days'])
+
+        old_children = [{
+            'row_id': f"shop_{d['shop_id']}",
+            'shop_id': d['shop_id'],
+            'shop_name': d['shop_name'],
+            'bd_name': d['bd_name'],
+            'consec_days': d['consec_days'],
+            'is_new': '老店'
+        } for d in bd_details if not d['is_new']]
+        old_children.sort(key=lambda x: x['consec_days'])
+
+        children = []
+        if new_children:
+            children.append({
+                'row_id': f"folder_new_{bn}",
+                'bd_name': '【新店】',
+                'new_count': len(new_children),
+                'children': new_children
+            })
+        if old_children:
+            children.append({
+                'row_id': f"folder_old_{bn}",
+                'bd_name': '【老店】',
+                'old_count': len(old_children),
+                'children': old_children
+            })
 
         biz_compare.append({
+            'row_id': f"bd_{bn}",
             'bd_name': bn,
             'new_count': new_count,
             'old_count': old_count,
